@@ -7,8 +7,35 @@ from f5_upgrade.utils.logging import setup_logging
 from f5_upgrade.utils.ssh import ssh_cmd
 
 
-def select_image():
-    return input("Firmware image path: ").strip()
+def get_user_input_gui():
+    import tkinter as tk
+    from tkinter import filedialog, simpledialog, messagebox
+    import sys as _sys
+
+    root = tk.Tk()
+    root.withdraw()
+
+    firmware_path = filedialog.askopenfilename(
+        title="Select F5 Firmware ISO (选择F5固件ISOファイルを選択)",
+        filetypes=[("ISO Files", "*.iso")]
+    )
+    if not firmware_path:
+        messagebox.showerror("Error", "No firmware selected. Exit.")
+        _sys.exit()
+
+    primary_ip = simpledialog.askstring("F5 Management IP", "Enter the primary F5 management IP:")
+    if not primary_ip:
+        messagebox.showerror("Error", "Primary IP required. Exit.")
+        _sys.exit()
+
+    secondary_ip = simpledialog.askstring("F5 Secondary IP", "Enter standby/secondary F5 IP (leave blank if standalone):")
+    username = simpledialog.askstring("SSH Username", "Enter SSH username:")
+    password = simpledialog.askstring("SSH Password", "Enter SSH password:", show="*")
+    if not username or not password:
+        messagebox.showerror("Error", "Username/password required. Exit.")
+        _sys.exit()
+
+    return firmware_path, primary_ip, secondary_ip, username, password
 
 
 def validate_device(ip, user, pwd, logger):
@@ -31,12 +58,8 @@ def post_check(ip, user, pwd, logger):
     ssh_cmd(ip, user, pwd, "tmsh show sys software", logger=logger)
 
 
-def run():
+def run(ip, user, pwd, image):
     logger, _ = setup_logging()
-    ip = input("Device IP: ").strip()
-    user = input("Username: ")
-    pwd = input("Password: ")
-    image = select_image()
     validate_device(ip, user, pwd, logger)
     backup_config(ip, user, pwd, logger)
     install_image(ip, user, pwd, image, logger)
@@ -45,4 +68,5 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    firmware_path, primary_ip, secondary_ip, username, password = get_user_input_gui()
+    run(primary_ip, username, password, firmware_path)

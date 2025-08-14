@@ -6,15 +6,40 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from f5_upgrade.utils.logging import setup_logging
 from f5_upgrade.utils.ssh import ssh_cmd
-from f5_upgrade.utils.report import save_html, save_excel, apply_highlight
+from f5_upgrade.utils.report import save_html, save_excel, analyse
 from f5_upgrade.utils.messages import MESSAGES
 
-ERROR_KEYS = ["expired", "invalid", "fail", "error", "critical", "alarm", "unavailable",
-              "inactive", "offline", "lost", "unreachable", "down", "degraded"]
-WARN_KEYS = ["warn", "deprecated", "high", "exceeded", "mismatch"]
 
-COLOR_MAP = {k: "#ffb3b3" for k in ERROR_KEYS}
-COLOR_MAP.update({k: "#fff4b3" for k in WARN_KEYS})
+def get_user_input_gui():
+    import tkinter as tk
+    from tkinter import filedialog, simpledialog, messagebox
+    import sys as _sys
+
+    root = tk.Tk()
+    root.withdraw()
+
+    firmware_path = filedialog.askopenfilename(
+        title="Select F5 Firmware ISO (选择F5固件ISOファイルを選択)",
+        filetypes=[("ISO Files", "*.iso")]
+    )
+    if not firmware_path:
+        messagebox.showerror("Error", "No firmware selected. Exit.")
+        _sys.exit()
+
+    primary_ip = simpledialog.askstring("F5 Management IP", "Enter the primary F5 management IP:")
+    if not primary_ip:
+        messagebox.showerror("Error", "Primary IP required. Exit.")
+        _sys.exit()
+
+    secondary_ip = simpledialog.askstring("F5 Secondary IP", "Enter standby/secondary F5 IP (leave blank if standalone):")
+    username = simpledialog.askstring("SSH Username", "Enter SSH username:")
+    password = simpledialog.askstring("SSH Password", "Enter SSH password:", show="*")
+    if not username or not password:
+        messagebox.showerror("Error", "Username/password required. Exit.")
+        _sys.exit()
+
+    return firmware_path, primary_ip, secondary_ip, username, password
+
 
 CHECK_COMMANDS = [
     "tmsh show sys hardware",
@@ -33,21 +58,17 @@ CHECK_COMMANDS = [
     "tmsh list ltm rule",
     "tmsh list sys file ssl-cert",
     "tmsh list /sys crypto cert",
-    "tmsh save /sys config file preupgrade_check.scf && cat /config/preupgrade_check.scf | egrep -i 'SSL::|HTTP::header remove All|class match|matchclass|LB::reselect'",
+    "tmsh save /sys config file preupgrade_check.scf",
 ]
 
 
-def analyse(text):
-    lt = text.lower()
-    severity = "normal"
-    focus = MESSAGES["default_ok"]
-    if any(k in lt for k in ERROR_KEYS):
-        severity = "critical"
-        focus = MESSAGES["default_warning"]
-    elif any(k in lt for k in WARN_KEYS):
-        severity = "warning"
-        focus = MESSAGES["default_warning"]
-    return severity, focus
+def check_deprecated_commands(ip, user, pwd, logger):
+    cmd = (
+        "cat /config/preupgrade_check.scf | "
+        "egrep -i 'SSL::|HTTP::header remove All|class match|matchclass|LB::reselect'"
+    )
+    result = ssh_cmd(ip, user, pwd, cmd, logger=logger)
+    return result["out"]
 
 
 def run():
@@ -59,37 +80,44 @@ def run():
     html_path = log_file.replace(".log", ".html")
     xlsx_path = log_file.replace(".log", ".xlsx")
 
-    ip = input("Device IP: ").strip()
-    user = input("Username: ")
-    pwd = input("Password: ")
+    if args.mock:
+        firmware_path = ""
+        primary_ip = "192.0.2.1"
+        secondary_ip = ""
+        username = "admin"
+        password = "password"
+    else:
+        firmware_path, primary_ip, secondary_ip, username, password = get_user_input_gui()
 
-    rows = []
-    for idx, cmd in enumerate(CHECK_COMMANDS, 1):
+    ip_list = [ip for ip in [primary_ip, secondary_ip] if ip]
+    results = []
+    idx = 1
+    for ip in ip_list:
+        for cmd in CHECK_COMMANDS:
+            if args.mock:
+                mock_outputs = {
+                    "tmsh show sys disk": "sda1 90% warn",
+                }
+                out = mock_outputs.get(cmd, f"simulated output for {cmd}")
+                result = {"rc": 0, "out": out, "err": "", "cmd": cmd}
+            else:
+                result = ssh_cmd(ip, username, password, cmd, logger=logger)
+            out = result["out"]
+            logger.info(f"[{ip}]$ {cmd}\n{out}")
+            _, msg = analyse(cmd, out)
+            results.append([idx, cmd, ip, out, msg["ja"]])
+            idx += 1
         if args.mock:
-            mock_outputs = {
-                "tmsh show sys disk": "sda1 90% warn",
-                "tmsh show sys license": "license valid",
-            }
-            out = mock_outputs.get(cmd, f"simulated output for {cmd}")
-            result = {"rc": 0, "out": out, "err": "", "cmd": cmd}
+            out = ""
         else:
-            result = ssh_cmd(ip, user, pwd, cmd, logger=logger)
-        out = result["out"]
-        logger.info(f"$ {cmd}\n{out}")
-        severity, focus = analyse(out)
-        highlight_rules = {k: ("#ff6b6b" if k in ERROR_KEYS else "#ffd93b") for k in COLOR_MAP if k in out.lower()}
-        highlighted = apply_highlight(out, highlight_rules) if highlight_rules else out
-        rows.append({
-            "index": idx,
-            "command": cmd,
-            "output": highlighted,
-            "raw_output": out,
-            "focus": focus,
-            "severity": severity,
-        })
+            out = check_deprecated_commands(ip, username, password, logger)
+        logger.info(f"[{ip}] deprecated command check\n{out}")
+        msg = MESSAGES["default_warning"] if out.strip() else MESSAGES["default_ok"]
+        results.append([idx, "deprecated command check", ip, out, msg["ja"]])
+        idx += 1
 
-    save_html(rows, html_path)
-    save_excel(rows, xlsx_path)
+    save_excel(results, xlsx_path)
+    save_html(results, html_path)
     logger.info(f"HTML report saved to {html_path}")
     logger.info(f"Excel report saved to {xlsx_path}")
 
